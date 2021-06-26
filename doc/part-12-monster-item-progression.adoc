@@ -1,0 +1,537 @@
+= Monster and item progression
+:icons: font
+:source-highlighter: pygments
+:source-language: rust
+ifdef::env-github[:outfilesuffix: .adoc]
+
+
+<<index#,Back to the index.>>
+
+
+== Random choices
+
+Now that the player character can become stronger, the challenges that
+await should become harder too! It sure would be nice if the type and
+quantity of monsters would vary with the dungeon level, as well as the
+items. This discovery is a great way to entice the player to go
+forward, wondering if around the next corner is something he or she
+has never seen before!
+
+Before going further though, let's have a look at how we're deciding
+which item to place on the map:
+
+[source]
+----
+let dice = rand::random::<f32>();
+let mut item = if dice < 0.7 {
+    // create a healing potion (70% chance)
+    ...
+} else if dice < 0.7 + 0.1 {
+    // create a lightning bolt scroll (10% chance)
+    ...
+} else if dice < 0.7 + 0.1 + 0.1 {
+    // create a fireball scroll (10% chance)
+    ...
+} else {
+    // create a confuse scroll (10% chance)
+    ...
+};
+----
+
+As we add more items, this will be harder to maintain. Every time we
+add an item, we'll have to change the probabilities in all these `if`
+checks.
+
+It would be much nicer if we could define a _loot table_. Luckily, the
+`rand` crate supports this using the `WeightedChoice` distribution:
+
+https://docs.rs/rand/~0/rand/distributions/index.html
+
+First, we specify the random table as an array of `WeightedChoice`
+structs:
+
+[source]
+----
+// monster random table
+let monster_chances = &mut [
+    Weighted {
+        weight: 80,
+        item: "orc",
+    },
+    Weighted {
+        weight: 20,
+        item: "troll",
+    },
+];
+let monster_choice = WeightedChoice::new(monster_chances);
+----
+
+(put this in `place_objects`)
+
+We can now call `monster_choice.ind_sample(&mut rand::thread_rng())`
+and it will return "orc" 80% of the time and "troll" the rest.
+
+The numbers in `Weighted.weight` aren't percentages, though. We could
+have just as easily said `8` for `orc` and `2` for `troll` or even `4`
+and `1`. The number just means chances relative to each other so you
+can use whichever ratio you fancy.
+
+Anyway, as usual we need to import the new types and we need to bring
+the `IndependentSample` trait into scope as well:
+
+[source]
+----
+tag::use_rand_types[]
+use rand::distributions::{IndependentSample, Weighted, WeightedChoice};
+end::use_rand_types[]
+----
+
+And now let's fix the monster random generation from a bunch of ifs to
+a neat `match` block:
+
+[source]
+----
+tag::generate_monster_orc_branch[]
+let mut monster = match monster_choice.ind_sample(&mut rand::thread_rng()) {
+    "orc" => {
+        // create an orc
+end::generate_monster_orc_branch[]
+        ...
+tag::generate_monster_troll_branch[]
+    }
+    "troll" => {
+        // create a troll
+end::generate_monster_troll_branch[]
+        ...
+tag::generate_monster_else_branch[]
+    }
+    _ => unreachable!(),
+};
+end::generate_monster_else_branch[]
+----
+
+The `"orc"` and `"troll"` blocks will contain the same code as the
+`if/else` blocks before.
+
+The `_ => unreachable!()` unreachable branch is there because in Rust,
+all `match` statements must be exhaustive -- they must cover all the
+possibilities. Since we're matching on a string here, we need to
+handle the case when the string is neither "orc" nor "troll".
+
+We know that can't happen because we've only specified those two
+possibilities in `monster_chances`, but Rust can't figure that out.
+
+If you want to avoid this issue, you can define an enum for each
+monster type like we do with `ItemType` for items. Then we'd match on
+that enum instead of a string.
+
+So let's do items next to show that off! Again, we define the
+`item_chances` table:
+
+[source]
+----
+// item random table
+let item_chances = &mut [
+    Weighted {
+        weight: 70,
+        item: Item::Heal,
+    },
+    Weighted {
+        weight: 10,
+        item: Item::Lightning,
+    },
+    Weighted {
+        weight: 10,
+        item: Item::Fireball,
+    },
+    Weighted {
+        weight:10,
+        item: Item::Confuse,
+    },
+];
+let item_choice = WeightedChoice::new(item_chances);
+----
+
+And again, update the `if/else` block to match on the item type
+instead:
+
+[source]
+----
+tag::place_items_table[]
+let mut item = match item_choice.ind_sample(&mut rand::thread_rng()) {
+    Item::Heal => {
+        // create a healing potion
+        let mut object = Object::new(x, y, '!', "healing potion", VIOLET, false);
+        object.item = Some(Item::Heal);
+        object
+    }
+    Item::Lightning => {
+        // create a lightning bolt scroll
+        let mut object =
+            Object::new(x, y, '#', "scroll of lightning bolt", LIGHT_YELLOW, false);
+        object.item = Some(Item::Lightning);
+        object
+    }
+    Item::Fireball => {
+        // create a fireball scroll
+        let mut object =
+            Object::new(x, y, '#', "scroll of fireball", LIGHT_YELLOW, false);
+        object.item = Some(Item::Fireball);
+        object
+    }
+    Item::Confuse => {
+        // create a confuse scroll
+        let mut object =
+            Object::new(x, y, '#', "scroll of confusion", LIGHT_YELLOW, false);
+        object.item = Some(Item::Confuse);
+        object
+    }
+end::place_items_table[]
+};
+----
+
+As you can see, we don't have to add a catch-all branch for items, because we
+handle all the variants of `Item`.
+
+
+A nice benefit of these choice tables is that we're keeping the logic
+for random chances separate from the one that actually generates the
+objects.
+
+So you can keep your random tables in a separate file that can be
+easily moddable, generate or modify it based on game options (e.g.
+difficulty), etc. without ever having to touch the object creation
+code.
+
+
+== Monster and item progression
+
+The only thing left is varying the contents of the dungeon (number of
+monsters and items, and their chances) according to the dungeon level.
+Instead of having fixed values, they could change with some formula,
+like the one we used to calculate how much xp is needed to level up.
+You're welcome to do this if you prefer; however in this section we
+will go down a slightly different path!
+
+What we'd like to be able to say is that the maximum number of items
+per room starts as 1 at level 1, and changes to 2 at level 4. We'll
+create a table of transition points. Each entry in the table says what
+the value changes to, and at what level. This should be easier to
+tune, since you can change the value of one level without affecting
+the values of the others!
+
+We can take a similar approach to the weighted randomness. Let's make
+a struct that defines the level and value:
+
+[source]
+----
+tag::transition_struct[]
+struct Transition {
+    level: u32,
+    value: u32,
+}
+end::transition_struct[]
+----
+
+Then we can define a list of these transition points and have a
+function that picks the right value for the given level. For the
+example above, we would define: `[Transition{level: 1, value: 1},
+Transition{level: 4, value: 2}]`.
+
+To get the correct value for a given level, we'll use this simple
+function:
+
+[source]
+----
+tag::from_dungeon_level_fn[]
+/// Returns a value that depends on level. the table specifies what
+/// value occurs after each level, default is 0.
+fn from_dungeon_level(table: &[Transition], level: u32) -> u32 {
+    table
+        .iter()
+        .rev()
+        .find(|transition| level >= transition.level)
+        .map_or(0, |transition| transition.value)
+}
+end::from_dungeon_level_fn[]
+----
+
+It takes a list of transitions, goes through them in reverse order
+(using the `rev` iterator method) and as soon as it finds a transition
+that's of the same or lower level, returns its `value`.
+
+Note that for this to work, the table must be sorted by the levels. We
+could do the sort explicitly as part of the `from_dungeon_level`
+function.
+
+
+
+And now we have the tools needed to make the level progression more
+interesting! Let's change the number of monsters and items and their
+chances. In `place_objects`:
+
+[source]
+----
+tag::monster_tables[]
+// maximum number of monsters per room
+let max_monsters = from_dungeon_level(
+    &[
+        Transition { level: 1, value: 2 },
+        Transition { level: 4, value: 3 },
+        Transition { level: 6, value: 5 },
+    ],
+    level,
+);
+
+// choose random number of monsters
+let num_monsters = rand::thread_rng().gen_range(0, max_monsters + 1);
+
+// monster random table
+let troll_chance = from_dungeon_level(
+    &[
+        Transition {
+            level: 3,
+            value: 15,
+        },
+        Transition {
+            level: 5,
+            value: 30,
+        },
+        Transition {
+            level: 7,
+            value: 60,
+        },
+    ],
+    level,
+);
+
+let monster_chances = &mut [
+    Weighted {
+        weight: 80,
+        item: "orc",
+    },
+    Weighted {
+        weight: troll_chance,
+        item: "troll",
+    },
+];
+let monster_choice = WeightedChoice::new(monster_chances);
+end::monster_tables[]
+----
+
+We define a transition table for the maximum number of monsters and we
+modify the chances of the troll showing up.
+
+Now for items a little lower down:
+
+[source]
+----
+tag::item_tables[]
+tag::item_tables_max_items[]
+// maximum number of items per room
+let max_items = from_dungeon_level(
+    &[
+        Transition { level: 1, value: 1 },
+        Transition { level: 4, value: 2 },
+    ],
+    level,
+);
+end::item_tables_max_items[]
+
+tag::item_tables_spells[]
+// item random table
+let item_chances = &mut [
+    // healing potion always shows up, even if all other items have 0 chance
+    Weighted {
+        weight: 35,
+        item: Item::Heal,
+    },
+    Weighted {
+        weight: from_dungeon_level(
+            &[Transition {
+                level: 4,
+                value: 25,
+            }],
+            level,
+        ),
+        item: Item::Lightning,
+    },
+    Weighted {
+        weight: from_dungeon_level(
+            &[Transition {
+                level: 6,
+                value: 25,
+            }],
+            level,
+        ),
+        item: Item::Fireball,
+    },
+    Weighted {
+        weight: from_dungeon_level(
+            &[Transition {
+                level: 2,
+                value: 10,
+            }],
+            level,
+        ),
+        item: Item::Confuse,
+    },
+end::item_tables_spells[]
+tag::item_tables_end[]
+];
+let item_choice = WeightedChoice::new(item_chances);
+end::item_tables_end[]
+end::item_tables[]
+
+...
+
+tag::random_item_count[]
+// choose random number of items
+let num_items = rand::thread_rng().gen_range(0, max_items + 1);
+end::random_item_count[]
+----
+
+We must also pass `level` to `place_object`.
+And since `place_objects` is called from `make_map`, we need to add it there too:
+
+[source]
+----
+tag::place_objects_header[]
+fn place_objects(room: Rect, map: &Map, objects: &mut Vec<Object>, level: u32) {
+end::place_objects_header[]
+    ...
+}
+
+tag::make_map_header[]
+fn make_map(objects: &mut Vec<Object>, level: u32) -> Map {
+end::make_map_header[]
+    ...
+tag::call_place_objects[]
+    // add some content to this room, such as monsters
+    place_objects(new_room, &map, objects, level);
+end::call_place_objects[]
+    ...
+}
+----
+
+And we need to pass it to the two places we call `make_map`.
+First, where we create the new game:
+
+[source]
+----
+tag::game_init[]
+let mut game = Game {
+    // generate map (at this point it's not drawn to the screen)
+    map: make_map(&mut objects, 1),  // <1>
+    messages: Messages::new(),
+    inventory: vec![],
+    dungeon_level: 1,
+};
+end::game_init[]
+----
+<1> Pass `1` (the first level) to `make_map`
+
+NOTE: We're now using the number `1` for the same thing in two different places:
+`map` and `dungeon_level`.
+You can pull it out to a variable or a `const` if this bothers you.
+
+And second, when we generate a new map after descending deeper into the dungeon:
+
+[source]
+----
+include::part-11-dungeon-progression.adoc[tag=next_level_fn_beginning]
+    ...
+tag::next_level_fn_build_level[]
+    game.dungeon_level += 1;
+    game.map = make_map(objects, game.dungeon_level);
+    initialise_fov(tcod, &game.map);
+}
+end::next_level_fn_build_level[]
+----
+
+You can now remove the `MAX_ROOM_MONSTERS` and `MAX_ROOM_ITEMS`
+constants (which the compiler will remind you to do) and change some
+of the stats to make the game more balanced:
+
+[source]
+----
+tag::heal_consts[]
+const HEAL_AMOUNT: i32 = 40;  // <1>
+end::heal_consts[]
+...
+tag::fireball_consts[]
+const FIREBALL_RADIUS: i32 = 3;
+const FIREBALL_DAMAGE: i32 = 25;  // <2>
+end::fireball_consts[]
+----
+<1> Changed from `4` to `40`
+<2> Changed from `12` to `25`
+
+And finally, let's update the stats of our monsters and player to reflect the new reality:
+
+[source]
+----
+// create an orc
+tag::generate_orc[]
+let mut orc = Object::new(x, y, 'o', "orc", DESATURATED_GREEN, true);
+orc.fighter = Some(Fighter {
+    max_hp: 20,  // <1>
+    hp: 20,  // <2>
+    defense: 0,
+    power: 4,  // <3>
+    xp: 35,
+    on_death: DeathCallback::Monster,
+});
+orc.ai = Some(Ai::Basic);
+orc
+end::generate_orc[]
+
+// create a troll
+tag::generate_troll[]
+let mut troll = Object::new(x, y, 'T', "troll", DARKER_GREEN, true);
+troll.fighter = Some(Fighter {
+    max_hp: 30,  // <4>
+    hp: 30,  // <5>
+    defense: 2,  // <6>
+    power: 8,  // <7>
+    xp: 100,
+    on_death: DeathCallback::Monster,
+});
+troll.ai = Some(Ai::Basic);
+troll
+end::generate_troll[]
+
+
+// create object representing the player
+tag::player_fighter[]
+player.fighter = Some(Fighter {
+    max_hp: 100,  // <8>
+    hp: 100,  // <9>
+    defense: 1,  // <10>
+    power: 4,  // <11>
+    xp: 0,
+    on_death: DeathCallback::Player,
+});
+end::player_fighter[]
+----
+<1> Change orc's `max_hp` from 10 to 20
+<2> Change orc's `hp` from 10 to 20
+<3> Change orc's `power` from 3 to 4
+<4> Change troll's `max_hp` from 16 to 30
+<5> Change troll's `hp` from 16 to 30
+<6> Change troll's `defense` from 1 to 2
+<7> Change troll's `power` from 4 to 8
+<8> Change player's `max_hp` from 30 to 100
+<9> Change player's `hp` from 30 to 100
+<10> Change player's `defense` from 2 to 1
+<11> Change player's `power` from 5 to 4
+
+And that's it. Try playing it for a bit. It will be challenging and
+you can't just bash your way through. Try to reach the level 10 or so.
+It's pretty fun already despite only having a couple of monsters and a
+few items. And it should be fairly straightforward to add more.
+
+
+Here's link:part-12-monster-item-progression.rs.txt[the complete code so far].
+
+Continue to <<part-13-adventure-gear#,the next part>>.

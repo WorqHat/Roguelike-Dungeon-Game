@@ -1,0 +1,1141 @@
+= Adventure gear
+:icons: font
+:source-highlighter: pygments
+:source-language: rust
+ifdef::env-github[:outfilesuffix: .adoc]
+
+
+<<index#,Back to the index.>>
+
+
+So now we have a dungeon full of monsters and scrolls, but it's still
+somewhat lacking in variety. Where are all the swords, shields, staves
+and so on?
+
+We need equipment. It differs from the items we have in two ways: you
+can only equip it in limited slots and it enhances your abilities
+while it's being worn. This is unlike our items which are one-use-only (though
+they don't have to be!).
+
+== Basic equipment
+
+Let's create an `Equipment` component. It will know whether it's
+equipped or not and it will also have a `slot` such as "hand" for
+weapons or "head" for helmets.
+
+[source]
+----
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+/// An object that can be equipped, yielding bonuses.
+struct Equipment {
+    slot: Slot,
+    equipped: bool,
+}
+
+tag::slot_enum[]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+enum Slot {
+    LeftHand,
+    RightHand,
+    Head,
+}
+end::slot_enum[]
+----
+
+NOTE: We're using `enum` for the equipment slots to stay safe from
+typos and forgetting to handle a new case in a `match`. You can just
+use a string instead, though.
+
+We'll add this new component to our `Object` and its `new` method:
+
+[source]
+----
+struct Object {
+    ...
+tag::object_field_equipment[]
+    equipment: Option<Equipment>,
+end::object_field_equipment[]
+}
+
+
+impl Object {
+    pub fn new(x: i32, y: i32, char: char, name: &str, color: Color, blocks: bool) -> Self {
+        Object {
+            ...
+tag::object_new_equipment[]
+            equipment: None,
+end::object_new_equipment[]
+        }
+    }
+    ...
+}
+----
+
+And let's add a couple of new `Object` methods for putting the
+equipment on and off:
+
+[source]
+----
+tag::equip_fn[]
+/// Equip object and show a message about it
+pub fn equip(&mut self, messages: &mut Messages) {
+    if self.item.is_none() {
+        messages.add(
+            format!("Can't equip {:?} because it's not an Item.", self),
+            RED,
+        );
+        return;
+    };
+    if let Some(ref mut equipment) = self.equipment {
+        if !equipment.equipped {
+            equipment.equipped = true;
+            messages.add(
+                format!("Equipped {} on {}.", self.name, equipment.slot),
+                LIGHT_GREEN,
+            );
+        }
+    } else {
+        messages.add(
+            format!("Can't equip {:?} because it's not an Equipment.", self),
+            RED,
+        );
+    }
+}
+end::equip_fn[]
+----
+
+The meat of the method is in its middle: we take the equipment
+component, mark its `equipped` value as true and print a message. The
+checks before and after are there to make sure that the `Object` we're
+calling is indeed an `Equipment` and also an `Item`.
+
+We could just ignore that since all equipments should be items (i.e.
+they can be carried in the inventory and dropped on the floor), it's
+better to see when the unexpected happens.
+
+Dequip works similarly:
+
+[source]
+----
+tag::dequip_fn[]
+/// Dequip object and show a message about it
+pub fn dequip(&mut self, messages: &mut Messages) {
+    if self.item.is_none() {
+        messages.add(
+            format!("Can't dequip {:?} because it's not an Item.", self),
+            RED,
+        );
+        return;
+    };
+    if let Some(ref mut equipment) = self.equipment {
+        if equipment.equipped {
+            equipment.equipped = false;
+            messages.add(
+                format!("Dequipped {} from {}.", self.name, equipment.slot),
+                LIGHT_YELLOW,
+            );
+        }
+    } else {
+        messages.add(
+            format!("Can't dequip {:?} because it's not an Equipment.", self),
+            RED,
+        );
+    }
+}
+end::dequip_fn[]
+----
+
+NOTE: You may have noticed that we're passing the message log
+(`Vec<(String, Color)>`) directly instead of the full `Game` struct
+like in other `Object` methods such as `attack` or `take_damage`. This
+is to avoid a double mutable borrow later. Try passing `game: &mut
+Game` here instead and you'll see the problem when we get to
+`toggle_equip`.
+
+How do we equip our items? We can rely on the existing `Item`
+mechanism -- when you try to "use" or "cast" an equipment (which you
+can do since it's an `Item`, too), we'll equip or unequip it.
+
+First, let's add a new Item type:
+
+[source]
+----
+enum Item {
+    Heal,
+    Lightning,
+    Confuse,
+    Fireball,
+    Equipment,
+}
+----
+
+NOTE: We'll just group all equipments under a single item type. We can
+always split them out later.
+
+Then in the callback match in `use_item`:
+
+[source]
+----
+let on_use = match item {
+    Heal => cast_heal,
+    Lightning => cast_lightning,
+    Fireball => cast_fireball,
+    Confuse => cast_confuse,
+    Equipment => toggle_equipment,
+}
+----
+
+We have to create the `toggle_equipment` function:
+
+[source]
+----
+tag::toggle_equipment_fn_header[]
+fn toggle_equipment(
+    inventory_id: usize,
+    _tcod: &mut Tcod,
+    game: &mut Game,
+    _objects: &mut [Object],
+) -> UseResult {
+end::toggle_equipment_fn_header[]
+tag::toggle_equipment_fn_if_branch[]
+    let equipment = match game.inventory[inventory_id].equipment {
+        Some(equipment) => equipment,
+        None => return UseResult::Cancelled,
+    };
+    if equipment.equipped {
+        game.inventory[inventory_id].dequip(&mut game.messages);
+    } else {
+end::toggle_equipment_fn_if_branch[]
+tag::toggle_equipment_fn_else_branch[]
+        game.inventory[inventory_id].equip(&mut game.messages);
+    }
+    UseResult::UsedAndKept
+}
+end::toggle_equipment_fn_else_branch[]
+----
+
+We're returning a new `UseResult` value here: one that says we have
+used the item (so it's the monsters' turn now), but we don't want the
+item to disappear!
+
+NOTE: Here is why we have to pass `&mut game.messages` to `equip` instead
+of the full `&mut game`: in the same statement we look up the
+equipment Object in `game.inventory`, which will make `game` mutably
+borrowed for the duration of the `equip` call. So we can't borrow it
+second time. However, since we're only borrowing `game.inventory`, we
+_can_ borrow `game.messages` separately! If you don't like this, you could
+turn the `equip` and `dequip` methods into standalone functions that
+would take `inventory_id` and `&mut game`.
+
+We need to add the new value to the `UseResult` enum and handle the
+new case in `use_item` (as always, the compiler will complain so you
+can rely on it to tell you where to look):
+
+[source]
+----
+tag::use_result_enum[]
+enum UseResult {
+    UsedUp,
+    UsedAndKept,
+    Cancelled,
+}
+end::use_result_enum[]
+----
+
+
+[source]
+----
+match on_use(inventory_id, objects, game, tcod) {
+    UseResult::UsedUp => {
+        ...
+    }
+tag::use_item_process_result_used_and_kept[]
+    UseResult::UsedAndKept => {} // do nothing
+end::use_item_process_result_used_and_kept[]
+    UseResult::Cancelled => {
+        ...
+    }
+}
+----
+
+And hey! Now we can have regular items that don't disappear upon use
+-- such as wands, spellbooks, lockpicks, etc.
+
+Finally, we need to update the item chances for this new
+`Equipment` type and add one to the game!
+
+Add this to the `item_chances` in `place_objects`:
+
+[source]
+----
+Weighted {weight: 1000, item: Item::Equipment},
+----
+
+And then this sword later on where we generate the items:
+
+[source]
+----
+Item::Equipment => {
+    // create a sword
+    let mut object = Object::new(x, y, '/', "sword", SKY, false);
+    object.item = Some(Item::Equipment);
+    object.equipment = Some(Equipment{equipped: false, slot: Slot::RightHand});
+    object
+}
+----
+
+As you can see, the weighted chances really don't have to be
+percentages. By setting the sword's value to `1000`, it's much more
+likely to appear than any other item so we can find it early in the game
+and test it!
+
+We will set it back to something more reasonable later on.
+
+
+== Equipment polish
+
+Now that we have the equipment basics in place, let's finish it up.
+First, we only want to have one item equipped in any given slot.
+Here's a function that returns an equipment that occupies a given slot
+(if it exists):
+
+[source]
+----
+tag::get_equipped_in_slot[]
+fn get_equipped_in_slot(slot: Slot, inventory: &[Object]) -> Option<usize> {
+    for (inventory_id, item) in inventory.iter().enumerate() {
+        if item
+            .equipment
+            .as_ref()
+            .map_or(false, |e| e.equipped && e.slot == slot)
+        {
+            return Some(inventory_id);
+        }
+    }
+    None
+}
+end::get_equipped_in_slot[]
+----
+
+We can use it to prevent a second item in the same slot, or better
+yet: dequip the old item to make room for the new one. In
+`toggle_equipment`:
+
+[source]
+----
+tag::toggle_equipment_fn_dequip[]
+// if the slot is already being used, dequip whatever is there first
+if let Some(current) = get_equipped_in_slot(equipment.slot, &game.inventory) {
+    game.inventory[current].dequip(&mut game.messages);
+}
+end::toggle_equipment_fn_dequip[]
+----
+
+Another nice behavior is to automatically equip picked up items, if
+their slots are available. In the `pick_item_up` function, in the
+`else` branch:
+
+[source]
+----
+tag::pick_item_up_else_branch[]
+let item = objects.swap_remove(object_id);
+game.messages
+    .add(format!("You picked up a {}!", item.name), GREEN);
+let index = game.inventory.len();
+let slot = item.equipment.map(|e| e.slot);
+game.inventory.push(item);
+
+// automatically equip, if the corresponding equipment slot is unused
+if let Some(slot) = slot {
+    if get_equipped_in_slot(slot, &game.inventory).is_none() {
+        game.inventory[index].equip(&mut game.messages);
+    }
+}
+end::pick_item_up_else_branch[]
+----
+
+We take the inventory index of the picked up item and an `Option` of
+the equipment slot (it's `None` if the item is not an equipment).
+
+Then we check whether that slot is occupied, and if not, equip the new
+item.
+
+We also need to de-equip an item if we're dropping it. In `drop_item`
+right after the `game.inventory.remove` line:
+
+[source]
+----
+tag::drop_item_dequip[]
+if item.equipment.is_some() {
+    item.dequip(&mut game.messages);
+}
+end::drop_item_dequip[]
+----
+
+It would also be nice if we could show which items are equipped in the
+inventory screen. Replace the `inventory.iter().map(...)` line in
+`inventory_menu` with:
+
+[source]
+----
+tag::inventory_menu_fn_show_equipment[]
+inventory
+    .iter()
+    .map(|item| {
+        // show additional information, in case it's equipped
+        match item.equipment {
+            Some(equipment) if equipment.equipped => {
+                format!("{} (on {})", item.name, equipment.slot)
+            }
+            _ => item.name.clone(),
+        }
+    })
+    .collect()
+end::inventory_menu_fn_show_equipment[]
+----
+
+We just replace the closure passed to `map` to report the equipped
+slot if available and the item name otherwise.
+
+You can check the equipment's state in the inventory screen, and it
+changes correctly as you pick up, drop, equip and dequip various
+items!
+
+One last thing to do here: the message log shows the equipment slot as
+capitalised:
+
+----
+Equipped sword on RightHand.
+----
+
+This is because the slots are enums and this is their `Debug`
+representation -- if they didn't have `#[derive(Debug)]`, we wouldn't
+be able to print them at all.
+
+It would be nice if we could override the output somehow. Or better
+yet, leave the debug output as is but provide a human-readable
+alternative!
+
+:display: https://doc.rust-lang.org/std/fmt/trait.Display.html
+
+The way to provide a user facing output in Rust is to implement the
+{display}[Display] trait.
+
+Let's give it a go:
+
+[source]
+----
+tag::impl_display_for_slot[]
+impl std::fmt::Display for Slot {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match *self {
+            Slot::LeftHand => write!(f, "left hand"),
+            Slot::RightHand => write!(f, "right hand"),
+            Slot::Head => write!(f, "head"),
+        }
+    }
+}
+end::impl_display_for_slot[]
+----
+
+The `write!` macro is similar to `format!` or `println!` but it writes
+to a `std::fmt::Formatter` struct.
+
+We can now use this new formatting by replacing `{:?}` to `{}` every
+time we print out a `Slot`. So in `inventory_menu`:
+
+[source]
+----
+format!("{} (on {})", item.name, equipment.slot)
+----
+
+and then the "Equipped on" and "Dequipped on" messages in `equip` and `dequip`.
+
+And now the equipment-related messages look much nicer!
+
+== Bonus round
+
+The last bit is to make equipment useful, by letting it change the
+player's stats when equipped. We could simply add the bonus value to a
+stat (say, attack power) when the item is equipped, and subtract it
+when dequipped. This is brittle because any tiny mistake will
+permanently change the player's stats!
+
+A more reliable approach is to calculate on-the-fly the player's stats
+when they are needed, based on the original stat and any bonuses. This
+way there's no room for inconsistencies -- the stat is truly based on
+whatever bonuses apply at the moment.
+
+Other languages have different ways of dealing with this (e.g.
+Python's properties), but in Rust we have to rely on functions and
+methods.
+
+We'll implement the `power` (attack) bonuses first and then do the
+analogous work for `defense` and `HP`.
+
+We'll create a `power` method on `Object` which will return the total
+power of the object (player or a monster):
+
+[source]
+----
+pub fn power(&self, game: &Game) -> i32 {
+    let base_power = ...;
+    let bonus = ...;
+    base_power + bonus
+}
+----
+
+So we get the base power of the object, then all the bonuses that apply
+and add them together. Easy!
+
+The base power is stored in the `Fighter` component, so we look it up
+there and return `0` if the object doesn't have the component
+(alternatively, you may return an error or an `Option<i32>`):
+
+[source]
+----
+let base_power = self.fighter.map_or(0, |f| f.power);
+----
+
+The bonus is going to be a little more complicated: we want to go
+through all the object's equipment and sum up their bonuses:
+
+[source]
+----
+let bonus = self
+    .get_all_equipped(game)
+    .iter()
+    .map(|e| e.power_bonus)
+    .sum();
+----
+
+This is a bit of a handful, so let us unpack it.
+
+First, we'll have a method called `get_all_equipped` which returns all
+equipment for the given object. Then we go through each equipment (using
+`iter`) and sum up all their power bonuses.
+
+The `sum` iterator method which just adds all
+numbers from an iterator together.
+
+Finally, the `Equipment` component needs to have the `power_bonus`
+property!
+
+So let's start there, then implement `get_all_equipped` and finally
+switch to using the `power` method.
+
+Extending the equipment is the easy part:
+
+[source]
+----
+struct Equipment {
+    slot: Slot,
+    equipped: bool,
+    power_bonus: i32,
+}
+----
+
+By using `i32`, the bonuses can be negative, e.g. for cursed items.
+
+When we try to compile it, Rust will remind us that we need to set the
+power bonus for our sword in `place_objects`. Let's just use `0` for now:
+
+[source]
+----
+object.equipment = Some(Equipment{equipped: false, slot: Slot::RightHand, power_bonus: 0});
+----
+
+Next, we'll add the `get_all_equipped` method:
+
+[source]
+----
+tag::get_all_equipped[]
+/// returns a list of equipped items
+pub fn get_all_equipped(&self, game: &Game) -> Vec<Equipment> {
+    if self.name == "player" {
+        game.inventory
+            .iter()
+            .filter(|item| item.equipment.map_or(false, |e| e.equipped))
+            .map(|item| item.equipment.unwrap())
+            .collect()
+    } else {
+        vec![] // other objects have no equipment
+    }
+}
+end::get_all_equipped[]
+----
+
+We go through the inventory filter out anything that's not an
+equipment and then return a vector of equipments.
+
+NOTE: The `if self.name == "player"` bit is a bit hacky. We have to do
+it because player is the only object with an inventory. If we added
+inventory to every object, or kept a unique ID associated with each
+object, we wouldn't need to do this.
+
+Anyway, we can calculate the full power value of each object, but
+there's one more thing we ought to do. Remember that we now have a
+`power` property as well as a `power` method. We should give them
+distinct names so we know which is which when editing code. Let's
+change `Fighter.power` to `Fighter.base_power`:
+
+[source]
+----
+struct Fighter {
+    // ...
+    base_power: i32,
+    // ...
+}
+----
+
+And let's update our `power` method to use `base_power`:
+
+[source]
+----
+tag::power_fn[]
+pub fn power(&self, game: &Game) -> i32 {
+    let base_power = self.fighter.map_or(0, |f| f.base_power);
+    let bonus: i32 = self
+        .get_all_equipped(game)
+        .iter()
+        .map(|e| e.power_bonus)
+        .sum();
+    base_power + bonus
+}
+end::power_fn[]
+----
+
+
+When we try to compile this, we'll see all the uses of `Fighter.power`
+in our code! We can then go one by one and decide whether we need the
+full or base power there.
+
+First, we'll update the damage calculation in our `attack` method:
+
+[source]
+----
+let damage = self.power(game) - target.fighter.map_or(0, |f| f.defense);
+----
+
+Next, we have to change `power` to `base_power` in `place_objects`:
+
+[source]
+----
+orc.fighter = Some(Fighter {
+    max_hp: 20,
+    hp: 20,
+    defense: 0,
+    base_power: 4,  // <1>
+    xp: 35,
+    on_death: DeathCallback::Monster,
+});
+
+...
+
+troll.fighter = Some(Fighter {
+    max_hp: 30,
+    hp: 30,
+    defense: 2,
+    base_power: 8,  // <2>
+    xp: 100,
+    on_death: DeathCallback::Monster,
+});
+----
+<1> `power` -> `base_power`
+<2> `power` -> `base_power`
+
+
+We want to show the full power in the character screen, so
+`handle_keys` match arm for `c` will become:
+
+[source]
+----
+let msg = format!("Character information
+
+Level: {}
+Experience: {}
+Experience to level up: {}
+
+Maximum HP: {}
+Attack: {}
+Defense: {}",
+    level,
+    fighter.xp,
+    level_up_xp,
+    fighter.max_hp,
+    player.power(game), // <1>
+    fighter.defense,
+);
+----
+<1> `fighter.power` -> `player.power(game)`
+
+But the `level_up` screen should only show the base power:
+
+[source]
+----
+choice = menu(
+    "Level up! Choose a stat to raise:\n",
+    &[
+        format!("Constitution (+20 HP, from {})", fighter.max_hp),
+        format!("Strength (+1 attack, from {})", fighter.base_power), // <1>
+        format!("Agility (+1 defense, from {})", fighter.defense),
+    ],
+    LEVEL_SCREEN_WIDTH,
+    &mut tcod.root,
+);
+----
+<1> `fighter.power` -> `fighter.base_power`
+
+And do the same a bit later on when we actually level up power:
+
+[source]
+----
+1 => {
+    fighter.base_power += 1;  // <1>
+}
+----
+<1> `fighter.power` -> `fighter.base_power`
+
+And finally, we need to player's `Fighter` component in `new_game`:
+
+[source]
+----
+player.fighter = Some(Fighter {
+    max_hp: 100,
+    hp: 100,
+    defense: 1,
+    base_power: 4, // <1>
+    xp: 0,
+    on_death: DeathCallback::Player,
+});
+----
+<1> `fighter.power` -> `fighter.base_power`
+
+Doing `defense` is exactly analogous: just rename `defense` to
+`base_defense` in `Fighter`, add `defense_bonus` to `Equipment` and
+fix the compilation errors.
+
+[source]
+----
+tag::defense_fn[]
+pub fn defense(&self, game: &Game) -> i32 {
+    let base_defense = self.fighter.map_or(0, |f| f.base_defense);
+    let bonus: i32 = self
+        .get_all_equipped(game)
+        .iter()
+        .map(|e| e.defense_bonus)
+        .sum();
+    base_defense + bonus
+}
+end::defense_fn[]
+----
+
+For example, here's the final damage formula in `attack`:
+
+[source]
+----
+tag::attack_damage_formula[]
+// a simple formula for attack damage
+let damage = self.power(game) - target.defense(game);
+end::attack_damage_formula[]
+----
+
+
+The case for `max_hp` is a little complicated by the fact that we use
+it in more places (`heal` and `cast_heal`). The beginning is the same,
+though: rename `max_hp` in `Fighter` to `base_max_hp`, add
+`bonus_max_hp` to `Equipment` and update monsters and equipment in
+`place_objects`.
+
+So the final `Fighter` struct looks like this:
+
+[source]
+----
+tag::fighter_struct_definition[]
+struct Fighter {
+    hp: i32,
+    base_max_hp: i32,
+    base_defense: i32,
+    base_power: i32,
+    xp: i32,
+    on_death: DeathCallback,
+}
+end::fighter_struct_definition[]
+----
+
+The `Equipment` struct:
+
+[source]
+----
+tag::equipment_struct[]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+/// An object that can be equipped, yielding bonuses.
+struct Equipment {
+    slot: Slot,
+    equipped: bool,
+    max_hp_bonus: i32,
+    defense_bonus: i32,
+    power_bonus: i32,
+}
+end::equipment_struct[]
+----
+
+And the and `max_hp` method on `Object`:
+
+[source]
+----
+tag::max_hp_fn[]
+pub fn max_hp(&self, game: &Game) -> i32 {
+    let base_max_hp = self.fighter.map_or(0, |f| f.base_max_hp);
+    let bonus: i32 = self
+        .get_all_equipped(game)
+        .iter()
+        .map(|e| e.max_hp_bonus)
+        .sum();
+    base_max_hp + bonus
+}
+end::max_hp_fn[]
+----
+
+We'll have to modify the `heal` method to pass in `Game`:
+
+[source]
+----
+tag::heal_fn[]
+/// heal by the given amount, without going over the maximum
+pub fn heal(&mut self, amount: i32, game: &Game) {  // <1>
+    let max_hp = self.max_hp(game);  // <2>
+    if let Some(ref mut fighter) = self.fighter {
+        fighter.hp += amount;
+        if fighter.hp > max_hp {  // <3>
+            fighter.hp = max_hp;  // <4>
+        }
+    }
+}
+end::heal_fn[]
+----
+<1> Pass `&Game` because it's required by the `max_hp` method
+<2> Get the maximum HP count including bonuses
+<3> Use the `max_hp` variable here
+<4> And here
+
+And we need to fix `cast_heal` as well:
+
+[source]
+----
+tag::cast_heal_fn[]
+fn cast_heal(
+    _inventory_id: usize,
+    _tcod: &mut Tcod,
+    game: &mut Game,
+    objects: &mut [Object],
+) -> UseResult {
+    // heal the player
+    let player = &mut objects[PLAYER];
+    if let Some(fighter) = player.fighter {
+        if fighter.hp == player.max_hp(game) {  // <1>
+            game.messages.add("You are already at full health.", RED);
+            return UseResult::Cancelled;
+        }
+        game.messages
+            .add("Your wounds start to feel better!", LIGHT_VIOLET);
+        player.heal(HEAL_AMOUNT, game);  // <2>
+        return UseResult::UsedUp;
+    }
+    UseResult::Cancelled
+}
+end::cast_heal_fn[]
+----
+<1> check HP against the `max_hp` method
+<2> `heal` requires `&Game` now
+
+And the healing at the beginning of `next_level` is now:
+
+[source]
+----
+tag::next_level_fn_heal[]
+let heal_hp = objects[PLAYER].max_hp(game) / 2;
+objects[PLAYER].heal(heal_hp, game);
+end::next_level_fn_heal[]
+----
+
+The player's stats should use the `defense` and `max_hp` methods too:
+
+
+[source]
+----
+let msg = format!("Character information
+
+Level: {}
+Experience: {}
+Experience to level up: {}
+
+Maximum HP: {}
+Attack: {}
+Defense: {}",
+tag::handle_character_key_values[]
+    level,
+    fighter.xp,
+    level_up_xp,
+    player.max_hp(game),
+    player.power(game),
+    player.defense(game)
+end::handle_character_key_values[]
+);
+----
+
+When we render the HP bar `render_all`, we also need to update the hit point calculation:
+
+[source]
+----
+tag::calculate_hp[]
+// show the player's stats
+let hp = objects[PLAYER].fighter.map_or(0, |f| f.hp);
+let max_hp = objects[PLAYER].max_hp(game);
+end::calculate_hp[]
+----
+
+And same in `level_up`:
+
+[source]
+----
+tag::level_up_fn_fighter[]
+let fighter = player.fighter.as_mut().unwrap();
+let mut choice = None;
+while choice.is_none() {
+    // keep asking until a choice is made
+    choice = menu(
+        "Level up! Choose a stat to raise:\n",
+        &[
+            format!("Constitution (+20 HP, from {})", fighter.base_max_hp),  // <1>
+            format!("Strength (+1 attack, from {})", fighter.base_power),  // <2>
+            format!("Agility (+1 defense, from {})", fighter.base_defense),  // <3>
+        ],
+        LEVEL_SCREEN_WIDTH,
+        &mut tcod.root,
+    );
+}
+fighter.xp -= level_up_xp;
+match choice.unwrap() {
+    0 => {
+        fighter.base_max_hp += 20;  // <4>
+        fighter.hp += 20;
+    }
+    1 => {
+        fighter.base_power += 1;  // <5>
+    }
+    2 => {
+        fighter.base_defense += 1;  // <6>
+    }
+    _ => unreachable!(),
+}
+end::level_up_fn_fighter[]
+----
+<1> `max_hp` -> `base_max_hp`
+<2> `power` -> `base_power`
+<3> `defense` -> `base_defense`
+<4> `max_hp` -> `base_max_hp`
+<5> `power` -> `base_power`
+<6> `defense` -> `base_defense`
+
+
+And finally, the orc and troll monsters need to use `base_max_hp` now:
+
+[source]
+----
+// create an orc
+tag::generate_orc[]
+let mut orc = Object::new(x, y, 'o', "orc", DESATURATED_GREEN, true);
+orc.fighter = Some(Fighter {
+    base_max_hp: 20,
+    hp: 20,
+    base_defense: 0,
+    base_power: 4,
+    xp: 35,
+    on_death: DeathCallback::Monster,
+});
+orc.ai = Some(Ai::Basic);
+orc
+end::generate_orc[]
+
+...
+
+// create a troll
+tag::generate_troll[]
+let mut troll = Object::new(x, y, 'T', "troll", DARKER_GREEN, true);
+troll.fighter = Some(Fighter {
+    base_max_hp: 30,
+    hp: 30,
+    base_defense: 2,
+    base_power: 8,
+    xp: 100,
+    on_death: DeathCallback::Monster,
+});
+troll.ai = Some(Ai::Basic);
+troll
+end::generate_troll[]
+----
+
+The values here are basically tuning the gameplay. Feel free to set them
+to whatever you wish.
+
+We'll set sword's `power_bonus` to `3` and leave the rest set to `0`.
+
+Next, we'll add a shield which has a defense bonus of `1`.
+
+Let's rename the `Equipment` item type to `Sword` and add a new one
+called `Shield`:
+
+[source]
+----
+tag::enum_item_definition[]
+enum Item {
+    Heal,
+    Lightning,
+    Confuse,
+    Fireball,
+    Sword,  // <1>
+    Shield,  // <2>
+}
+end::enum_item_definition[]
+----
+<1> `Equipment` -> `Sword`
+<2> This is new
+
+and in `use_item`:
+
+[source]
+----
+tag::use_item_get_on_use[]
+let on_use = match item {
+    Heal => cast_heal,
+    Lightning => cast_lightning,
+    Confuse => cast_confuse,
+    Fireball => cast_fireball,
+    Sword => toggle_equipment,  // <1>
+    Shield => toggle_equipment,  // <2>
+};
+end::use_item_get_on_use[]
+----
+<1> `Equipment` -> `Sword`
+<2> This is new
+
+And assign them chances in `place_objects`. We'll use our
+`from_dungeon_level` method here to only show these items later in the game:
+
+[source]
+----
+// item random table
+let item_chances = &mut [
+    ...
+tag::item_tables_equipment[]
+    Weighted {
+        weight: from_dungeon_level(&[Transition { level: 4, value: 5 }], level),
+        item: Item::Sword, // <1>
+    },
+    Weighted {
+        weight: from_dungeon_level(
+            &[Transition {
+                level: 8,
+                value: 15,
+            }],
+            level,
+        ),
+        item: Item::Shield, // <2>
+    },
+end::item_tables_equipment[]
+];
+----
+<1> This replaces `Item::Equipment`
+<2> This is new
+
+and further down in the `match` expression we'll actually create the
+shield:
+
+[source]
+----
+tag::create_shield[]
+Item::Shield => {
+    // create a shield
+    let mut object = Object::new(x, y, '[', "shield", DARKER_ORANGE, false);
+    object.item = Some(Item::Shield);
+    object.equipment = Some(Equipment {
+        equipped: false,
+        slot: Slot::LeftHand,
+        max_hp_bonus: 0,
+        defense_bonus: 1,
+        power_bonus: 0,
+    });
+    object
+}
+end::create_shield[]
+----
+
+And we need to update our sword creation code too:
+
+[source]
+----
+tag::create_sword[]
+Item::Sword => {
+    // create a sword
+    let mut object = Object::new(x, y, '/', "sword", SKY, false);
+    object.item = Some(Item::Sword);
+    object.equipment = Some(Equipment {
+        equipped: false,
+        slot: Slot::RightHand,
+        max_hp_bonus: 0,
+        defense_bonus: 0,
+        power_bonus: 3,
+    });
+    object
+}
+end::create_sword[]
+----
+
+And finally, let's give our player something to start with. They can't
+go into the dungeon unarmed, after all!
+
+So in `new_game` after we initialise the `Game` struct:
+
+[source]
+----
+tag::dagger_equipment[]
+// initial equipment: a dagger
+let mut dagger = Object::new(0, 0, '-', "dagger", SKY, false);
+dagger.item = Some(Item::Sword);
+dagger.equipment = Some(Equipment {
+    equipped: true,
+    slot: Slot::LeftHand,
+    max_hp_bonus: 0,
+    defense_bonus: 0,
+    power_bonus: 2,
+});
+game.inventory.push(dagger);
+end::dagger_equipment[]
+----
+
+But let's also decrease player's initial power to `2` since this _is_
+a dungeon of doom after all!
+
+[source]
+----
+tag::player_fighter[]
+player.fighter = Some(Fighter {
+    base_max_hp: 100,
+    hp: 100,
+    base_defense: 1,
+    base_power: 2,
+    xp: 0,
+    on_death: DeathCallback::Player,
+});
+end::player_fighter[]
+----
+
+And that's it. We've got a bonus system that's generic enough for all
+kinds of crazy equipment. So: play the game, add stuff, change stuff,
+modify it to your heart's content or write something completely new
+from scratch.
+
+*Have fun!*
+
+Here's link:part-13-adventure-gear.rs.txt[the complete code].
